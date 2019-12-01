@@ -9,9 +9,11 @@ GAMMA = 0.99            # discount factor
 TAU = 1e-2             # for soft update of target parameters
 LR_ACTOR = 1e-3         # learning rate of the actor 
 LR_CRITIC = 5e-3        # learning rate of the critic
-WEIGHT_DECAY_ACTOR = 0.01        # L2 weight decay of ACTOR
-WEIGHT_DECAY_CRITIC = 0.01        # L2 weight decayof CRITIC
-UPDATE_EVERY = 16       # how often to update the network
+WEIGHT_DECAY_ACTOR = 0.0        # L2 weight decay of ACTOR
+WEIGHT_DECAY_CRITIC = 0.0        # L2 weight decayof CRITIC
+UPDATE_EVERY = 4       # how often to update the network
+PER_ALPHA = 0.75       # how much prioritization is used
+PER_BETA = 0.75       # To what degree to use importance weights
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -70,7 +72,7 @@ class MADDPG:
     def __init__(self, state_size, action_size, num_agents, random_seed):
         self.agents = [DDPG(state_size, action_size, num_agents, random_seed), 
                       DDPG(state_size, action_size, num_agents, random_seed)]
-        self.memory = PrioritizedReplayBuffer(action_size, BUFFER_SIZE, BATCH_SIZE, random_seed)
+        self.memory = PrioritizedReplayBuffer(BUFFER_SIZE, PER_ALPHA)
         self.num_agents = num_agents
         self.state_size = state_size
         self.action_size = action_size
@@ -105,7 +107,7 @@ class MADDPG:
             # If enough samples are available in memory, get random subset and learn
             if len(self.memory) > BATCH_SIZE * (BUFFER_SIZE / BATCH_SIZE/ 5):
                 for ai in range(self.num_agents):
-                    experiences = self.memory.sample(b=1)
+                    experiences = self.memory.sample(BATCH_SIZE, beta=PER_BETA)
                     self.learn(experiences, ai, GAMMA)
     
     def reset(self):
@@ -123,7 +125,7 @@ class MADDPG:
             experiences (Tuple[torch.Tensor]): tuple of (s, a, r, s', done) tuples 
             gamma (float): discount factor
         """
-        
+
         idxes, states, actions, rewards, next_states, is_weights, dones = experiences
 
         agent = self.agents[ai]
@@ -144,9 +146,9 @@ class MADDPG:
         Q_expected = agent.critic_local(states.view(BATCH_SIZE,-1), actions.view(BATCH_SIZE,-1))
 
         # Get priorities and update
-        priorities = torch.abs(Q_targets - Q_expected) + 1.
+        priorities = torch.abs(Q_targets - Q_expected) + 1e-6 # prioritized_replay_eps
         priorities = priorities.squeeze(1).cpu().data.numpy()
-        self.memory.update(idxes, priorities)
+        self.memory.update_priorities(idxes, priorities)
         # Minimize the loss
         # zero_grad because we do not want to accumulate 
         # gradients from other batches, so needs to be cleared
