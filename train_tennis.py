@@ -19,6 +19,7 @@ def maddpg(n_episodes=2000, max_t=1000, print_every=10):
         env_info = env.reset(train_mode=True)[brain_name]
         state = env_info.vector_observations
         score = np.zeros(num_agents)
+        agents.reset() # noise reset only currently
         for t in range(max_t):
             action = agents.act(state)
             env_info = env.step(action)[brain_name]

@@ -3,13 +3,13 @@ import torch.optim as optim
 from model import Actor, Critic, ReplayBuffer, OUNoise, np, torch, F
 
 BUFFER_SIZE = int(5e4)  # replay buffer size
-BATCH_SIZE = 128        # minibatch size
+BATCH_SIZE = 256        # minibatch size
 GAMMA = 0.99            # discount factor
 TAU = 1e-3              # for soft update of target parameters
 LR_ACTOR = 1e-4         # learning rate of the actor 
-LR_CRITIC = 1e-4        # learning rate of the critic
+LR_CRITIC = 5e-4        # learning rate of the critic
 WEIGHT_DECAY_ACTOR = 0.0        # L2 weight decay of ACTOR
-WEIGHT_DECAY_CRITIC = 0.01        # L2 weight decayof CRITIC
+WEIGHT_DECAY_CRITIC = 0.0        # L2 weight decayof CRITIC
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -59,10 +59,13 @@ class DDPG():
         # state = torch.from_numpy(state).float().to(device)
         action = self.actor_target(state)
         return action
-        
-    def reset(self):
+
+    def noise_reset(self):
         """ reset noise """
         self.noise.reset()
+    def reset(self):
+        """ reset noise """
+        self.noise_reset()
 
 class MADDPG:
     def __init__(self, state_size, action_size, num_agents, random_seed):
@@ -102,8 +105,6 @@ class MADDPG:
                 self.learn(experiences, ai, GAMMA)
     
     def reset(self):
-        #print("Agents {}".format(self.agents[0]))
-        #self.agents[0].reset()
         [agent.reset() for agent in self.agents]
         
     def learn(self, experiences, ai, gamma):
