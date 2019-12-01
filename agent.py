@@ -10,6 +10,11 @@ LR_ACTOR = 1e-4         # learning rate of the actor
 LR_CRITIC = 5e-4        # learning rate of the critic
 WEIGHT_DECAY_ACTOR = 0.0        # L2 weight decay of ACTOR
 WEIGHT_DECAY_CRITIC = 0.0        # L2 weight decayof CRITIC
+ONU_THETA = 0.15 # ONU noise init parameter theta
+ONU_SIGMA = 0.20 # ONU noise init parameter sigma
+EPS_START = 5.0         # initial value for epsilon in noise decay process in Agent.act()
+EPS_EP_END = 300        # episode to end the noise decay process
+EPS_FINAL = 0           # final value for epsilon after decay
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -33,9 +38,9 @@ class DDPG():
         self.critic_optimizer = optim.Adam(self.critic_local.parameters(), lr=LR_CRITIC, weight_decay=WEIGHT_DECAY_CRITIC)
         
         # noise processing
-        self.noise = OUNoise((action_size), random_seed)
+        self.noise = OUNoise(action_size, random_seed, theta = ONU_THETA, sigma = ONU_SIGMA )
         
-    def act(self, state, add_noise=True):
+    def act(self, state, add_noise=True, eps = 1.0):
         """Returns actions for given state as per current policy."""
         # convert state from numpy to pytorch array 
         state = torch.from_numpy(state).float().to(device)
@@ -48,7 +53,7 @@ class DDPG():
         # turn the nn into training mode
         self.actor_local.train()
         if add_noise:
-            action += self.noise.sample()
+            action = action + eps * self.noise.sample()
         
         # clipping the action from min to max
         return np.clip(action, -1, 1)
@@ -75,7 +80,8 @@ class MADDPG:
         self.num_agents = num_agents
         self.state_size = state_size
         self.action_size = action_size
-        
+        self.eps = EPS_START
+        self.eps_decay = 1/(EPS_EP_END)  # set decay rate based on epsilon end target
     def act(self, states, add_noise=True):
         """Returns actions for given state as per current policy."""
         actions = [agent.act(state, add_noise) for agent, state in zip(self.agents, states)]
@@ -170,6 +176,12 @@ class MADDPG:
         # ----------------------- update target networks ----------------------- #
         self.soft_update(agent.critic_local, agent.critic_target, TAU)
         self.soft_update(agent.actor_local, agent.actor_target, TAU)
+
+        # update noise decay parameter
+        if self.eps >= EPS_FINAL:
+            self.eps -= self.eps_decay
+            self.eps = max(self.eps, EPS_FINAL)
+        agent.reset()
 
     def soft_update(self, local_model, target_model, tau):
         """Soft update model parameters.
