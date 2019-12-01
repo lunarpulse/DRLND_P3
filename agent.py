@@ -1,15 +1,17 @@
 import torch.optim as optim
 
 from model import Actor, Critic, ReplayBuffer, OUNoise, np, torch, F
+from prioritized_experience_replay import  PrioritizedReplayBuffer, WeightedLoss
 
-BUFFER_SIZE = int(5e4)  # replay buffer size
-BATCH_SIZE = 256        # minibatch size
+BUFFER_SIZE = int(1e4)  # replay buffer size
+BATCH_SIZE = 128        # minibatch size
 GAMMA = 0.99            # discount factor
-TAU = 1e-3              # for soft update of target parameters
-LR_ACTOR = 1e-4         # learning rate of the actor 
-LR_CRITIC = 5e-4        # learning rate of the critic
-WEIGHT_DECAY_ACTOR = 0.0        # L2 weight decay of ACTOR
-WEIGHT_DECAY_CRITIC = 0.0        # L2 weight decayof CRITIC
+TAU = 1e-2             # for soft update of target parameters
+LR_ACTOR = 1e-3         # learning rate of the actor 
+LR_CRITIC = 5e-3        # learning rate of the critic
+WEIGHT_DECAY_ACTOR = 0.01        # L2 weight decay of ACTOR
+WEIGHT_DECAY_CRITIC = 0.01        # L2 weight decayof CRITIC
+UPDATE_EVERY = 16       # how often to update the network
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -60,21 +62,20 @@ class DDPG():
         action = self.actor_target(state)
         return action
 
-    def noise_reset(self):
-        """ reset noise """
-        self.noise.reset()
     def reset(self):
         """ reset noise """
-        self.noise_reset()
+        self.noise.reset()
 
 class MADDPG:
     def __init__(self, state_size, action_size, num_agents, random_seed):
         self.agents = [DDPG(state_size, action_size, num_agents, random_seed), 
                       DDPG(state_size, action_size, num_agents, random_seed)]
-        self.memory = ReplayBuffer(BUFFER_SIZE, BATCH_SIZE, random_seed)
+        self.memory = PrioritizedReplayBuffer(action_size, BUFFER_SIZE, BATCH_SIZE, random_seed)
         self.num_agents = num_agents
         self.state_size = state_size
         self.action_size = action_size
+        self.t_step = 0
+        self.criterion = WeightedLoss()
         
     def act(self, states, add_noise=True):
         """Returns actions for given state as per current policy."""
@@ -98,11 +99,14 @@ class MADDPG:
                         reward.reshape((1, self.num_agents, -1)), next_state.reshape((1,self.num_agents, -1)), \
                         done.reshape((1, self.num_agents, -1)))
         
-        # Learn, if enough samples are available in memory
-        if len(self.memory) > BATCH_SIZE:
-            for ai in range(self.num_agents):
-                experiences = self.memory.sample()
-                self.learn(experiences, ai, GAMMA)
+        # Learn every UPDATE_EVERY time steps.
+        self.t_step += 1
+        if self.t_step % UPDATE_EVERY == 0:
+            # If enough samples are available in memory, get random subset and learn
+            if len(self.memory) > BATCH_SIZE * (BUFFER_SIZE / BATCH_SIZE/ 5):
+                for ai in range(self.num_agents):
+                    experiences = self.memory.sample(b=1)
+                    self.learn(experiences, ai, GAMMA)
     
     def reset(self):
         [agent.reset() for agent in self.agents]
@@ -120,7 +124,7 @@ class MADDPG:
             gamma (float): discount factor
         """
         
-        states, actions, rewards, next_states, dones = experiences
+        idxes, states, actions, rewards, next_states, is_weights, dones = experiences
 
         agent = self.agents[ai]
         # ---------------------------- update critic ---------------------------- #
@@ -138,12 +142,17 @@ class MADDPG:
         Q_targets = rewards[:,ai] + (gamma * Q_targets_next * (1 - dones[:,ai]))
         # Compute critic loss
         Q_expected = agent.critic_local(states.view(BATCH_SIZE,-1), actions.view(BATCH_SIZE,-1))
-        # mean squared error loss
-        critic_loss = F.mse_loss(Q_expected, Q_targets)
+
+        # Get priorities and update
+        priorities = torch.abs(Q_targets - Q_expected) + 1.
+        priorities = priorities.squeeze(1).cpu().data.numpy()
+        self.memory.update(idxes, priorities)
         # Minimize the loss
         # zero_grad because we do not want to accumulate 
         # gradients from other batches, so needs to be cleared
         agent.critic_optimizer.zero_grad()
+        # compute weighted loss
+        critic_loss = self.criterion(is_weights, Q_expected, Q_targets)
         # compute derivatives for all variables that
         # requires_grad-True
         critic_loss.backward()

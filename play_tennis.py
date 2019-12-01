@@ -2,10 +2,7 @@ from unityagents import UnityEnvironment
 import numpy as np
 
 from agent import MADDPG
-from model import ReplayBuffer
 import torch
-import torch.nn.functional as F
-import torch.optim as optim
 
 env = UnityEnvironment(file_name="./Tennis_Linux/Tennis.x86_64")
 # get the default brain

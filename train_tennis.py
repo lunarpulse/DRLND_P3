@@ -2,9 +2,7 @@ from unityagents import UnityEnvironment
 import numpy as np
 
 from agent import MADDPG
-from model import ReplayBuffer
 import torch
-import torch.nn.functional as F
 import torch.optim as optim
 
 from collections import deque
