@@ -49,11 +49,13 @@ The environment is considered solved, when the average (over 100 episodes) of th
 
 ## Instructions
 
-Follow the instructions in `Tennis.ipynb` to get started with training your own agent!  
+Follow the instructions in `Report.ipynb` to get started with training your own agent!
+For Reviewers: The `Report.ipynb` is the only file to check. not `tennis.ipynb`.
 
-## (Optional) Challenge: Crawler Environment
+## (Optional) Challenge: Soccer Environment
 
 After you have successfully completed the project, you might like to solve the more difficult **Soccer** environment.
+This challenge is in `MADDPG_ONU_Soccer` branch.
 
 ![Soccer][image2]
 
