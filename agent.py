@@ -1,9 +1,10 @@
 import torch.optim as optim
+from torch.autograd import Variable
 
 from model import Actor, Critic, ReplayBuffer, OUNoise, np, torch, F
-from prioritized_experience_replay import  PrioritizedReplayBuffer, WeightedLoss
+from prioritized_memory import Memory
 
-BUFFER_SIZE = int(1e4)  # replay buffer size
+BUFFER_SIZE = int(2e4)  # replay buffer size
 BATCH_SIZE = 128        # minibatch size
 GAMMA = 0.99            # discount factor
 TAU = 1e-2             # for soft update of target parameters
@@ -12,8 +13,6 @@ LR_CRITIC = 5e-3        # learning rate of the critic
 WEIGHT_DECAY_ACTOR = 0.0        # L2 weight decay of ACTOR
 WEIGHT_DECAY_CRITIC = 0.0        # L2 weight decayof CRITIC
 UPDATE_EVERY = 4       # how often to update the network
-PER_ALPHA = 0.75       # how much prioritization is used
-PER_BETA = 0.75       # To what degree to use importance weights
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -30,7 +29,6 @@ class DDPG():
         self.actor_target = Actor(state_size, action_size, self.seed).to(device)
         self.actor_optimizer = optim.Adam(self.actor_local.parameters(), lr=LR_ACTOR, weight_decay=WEIGHT_DECAY_ACTOR)
         
-        #print ("AGENTS {}".format(num_agents))
         # Construct Critic networks 
         self.critic_local = Critic(num_agents * state_size, num_agents * action_size, self.seed).to(device)
         self.critic_target = Critic(num_agents * state_size, num_agents * action_size, self.seed).to(device)
@@ -72,12 +70,11 @@ class MADDPG:
     def __init__(self, state_size, action_size, num_agents, random_seed):
         self.agents = [DDPG(state_size, action_size, num_agents, random_seed), 
                       DDPG(state_size, action_size, num_agents, random_seed)]
-        self.memory = PrioritizedReplayBuffer(BUFFER_SIZE, PER_ALPHA)
+        self.memory = Memory(BUFFER_SIZE)
         self.num_agents = num_agents
         self.state_size = state_size
         self.action_size = action_size
         self.t_step = 0
-        self.criterion = WeightedLoss()
         
     def act(self, states, add_noise=True):
         """Returns actions for given state as per current policy."""
@@ -91,29 +88,46 @@ class MADDPG:
     
     def step(self, state, action, reward, next_state, done):
         """Save experience in replay memory, and use random sample from buffer to learn."""
-        # Save experience / reward
-        state = np.asanyarray(state)
-        action = np.asanyarray(action)
-        reward = np.asanyarray(reward)
-        next_state = np.asanyarray(next_state)
-        done = np.asanyarray(done)
-        self.memory.add(state.reshape((1, self.num_agents, -1)), action.reshape((1, self.num_agents, -1)), \
-                        reward.reshape((1, self.num_agents, -1)), next_state.reshape((1,self.num_agents, -1)), \
-                        done.reshape((1, self.num_agents, -1)))
-        
+        # Compute error
+        for ai in range(self.num_agents):
+            agent = self.agents[ai]
+            action_current = agent.act(state, add_noise = False)
+            state_input = torch.from_numpy(state).float().to(device).view(1, -1)
+            action_current_tensor = torch.from_numpy(action_current).float().to(device)
+            old_val = agent.critic_local.forward(state_input, action_current_tensor.view(1, -1)).detach().cpu().numpy()
+            if done[ai]:
+                new_val = reward[ai]
+            else:
+                new_val = reward[ai] + GAMMA * agent.critic_target(state_input, action_current_tensor.view(1, -1)).detach().cpu().numpy()
+
+            # Get priorities and update
+            error = abs(old_val - new_val)
+
+            # Save experience / reward
+            state = np.asanyarray(state)
+            action = np.asanyarray(action)
+            reward = np.asanyarray(reward)
+            next_state = np.asanyarray(next_state)
+            done = np.asanyarray(done)
+            self.memory.add(error,
+                            (state.reshape((1, self.num_agents, -1)), action.reshape((1, self.num_agents, -1)), \
+                            reward.reshape((1, self.num_agents, -1)), next_state.reshape((1,self.num_agents, -1)), \
+                            done.reshape((1, self.num_agents, -1))
+                            ))
+            
         # Learn every UPDATE_EVERY time steps.
         self.t_step += 1
         if self.t_step % UPDATE_EVERY == 0:
             # If enough samples are available in memory, get random subset and learn
             if len(self.memory) > BATCH_SIZE * (BUFFER_SIZE / BATCH_SIZE/ 5):
                 for ai in range(self.num_agents):
-                    experiences = self.memory.sample(BATCH_SIZE, beta=PER_BETA)
-                    self.learn(experiences, ai, GAMMA)
+                    mini_batch, idxs, is_weights = self.memory.sample(BATCH_SIZE)
+                    self.learn(mini_batch, idxs, is_weights, ai, GAMMA)
     
     def reset(self):
         [agent.reset() for agent in self.agents]
         
-    def learn(self, experiences, ai, gamma):
+    def learn(self, experience_batch, idxs, is_weights, ai, gamma):
         """Update policy and value parameters using given batch of experience tuples.
         Q_targets = r + γ * critic_target(next_state, actor_target(next_state))
         where:
@@ -125,8 +139,18 @@ class MADDPG:
             experiences (Tuple[torch.Tensor]): tuple of (s, a, r, s', done) tuples 
             gamma (float): discount factor
         """
+        #   idxes, states, actions, rewards, next_states, is_weights, dones = experiences
 
-        idxes, states, actions, rewards, next_states, is_weights, dones = experiences
+        mini_batch = [*zip(*experience_batch)] #https://stackoverflow.com/questions/4937491/matrix-transpose-in-python
+
+        states = torch.FloatTensor(np.vstack(mini_batch[0])).to(device)
+        actions = torch.FloatTensor(list(mini_batch[1])).to(device)
+        rewards = torch.FloatTensor(list(mini_batch[2])).to(device)
+        next_states = torch.FloatTensor(np.vstack(mini_batch[3])).to(device)
+        dones = torch.FloatTensor(mini_batch[4]).to(device)
+
+        # bool to binary
+        # dones = dones.astype(int)
 
         agent = self.agents[ai]
         # ---------------------------- update critic ---------------------------- #
@@ -135,26 +159,36 @@ class MADDPG:
         next_states = next_states.view(1, BATCH_SIZE, self.num_agents, -1)
         actions_next = self.target_act(next_states)
         actions_next = torch.cat(actions_next, dim=1)
+
         next_states = next_states.view(BATCH_SIZE,-1)
         actions_next = actions_next.view(BATCH_SIZE,-1)
-        
+
+        rewards_tensor = rewards.view(BATCH_SIZE, self.num_agents)
+        dones_tensor = dones.view(BATCH_SIZE, self.num_agents)
+
         Q_targets_next = agent.critic_target(next_states, actions_next)
         
         # Compute Q targets for current states (y_i)
-        Q_targets = rewards[:,ai] + (gamma * Q_targets_next * (1 - dones[:,ai]))
+        discount_np = Q_targets_next.detach().cpu().numpy() * dones_tensor[:,ai].cpu().numpy() * gamma
+        discount_value = torch.FloatTensor(discount_np).to(device)
+        Q_targets = rewards_tensor[:,ai] + discount_value
+
         # Compute critic loss
         Q_expected = agent.critic_local(states.view(BATCH_SIZE,-1), actions.view(BATCH_SIZE,-1))
 
         # Get priorities and update
-        priorities = torch.abs(Q_targets - Q_expected) + 1e-6 # prioritized_replay_eps
-        priorities = priorities.squeeze(1).cpu().data.numpy()
-        self.memory.update_priorities(idxes, priorities)
+        errors = torch.abs(Q_expected - Q_targets).detach().cpu().numpy()
+        # update priority
+        for i in range(BATCH_SIZE):
+            idx = idxs[i]
+            self.memory.update(idx, errors[i])
+
         # Minimize the loss
         # zero_grad because we do not want to accumulate 
         # gradients from other batches, so needs to be cleared
         agent.critic_optimizer.zero_grad()
         # compute weighted loss
-        critic_loss = self.criterion(is_weights, Q_expected, Q_targets)
+        critic_loss = (torch.FloatTensor(is_weights) * F.mse_loss(Q_expected, Q_targets)).mean()
         # compute derivatives for all variables that
         # requires_grad-True
         critic_loss.backward()
