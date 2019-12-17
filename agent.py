@@ -1,15 +1,14 @@
 import torch.optim as optim
-from torch.autograd import Variable
 
 from model import Actor, Critic, ReplayBuffer, OUNoise, np, torch, F
 from prioritized_memory import Memory
 
-BUFFER_SIZE = int(2e4)  # replay buffer size
-BATCH_SIZE = 128        # minibatch size
+BUFFER_SIZE = int(5e4)  # replay buffer size
+BATCH_SIZE = 256        # minibatch size
 GAMMA = 0.99            # discount factor
-TAU = 1e-2             # for soft update of target parameters
-LR_ACTOR = 1e-3         # learning rate of the actor 
-LR_CRITIC = 5e-3        # learning rate of the critic
+TAU = 1e-3              # for soft update of target parameters
+LR_ACTOR = 1e-4         # learning rate of the actor 
+LR_CRITIC = 5e-4        # learning rate of the critic
 WEIGHT_DECAY_ACTOR = 0.0        # L2 weight decay of ACTOR
 WEIGHT_DECAY_CRITIC = 0.0        # L2 weight decayof CRITIC
 UPDATE_EVERY = 4       # how often to update the network
@@ -119,7 +118,7 @@ class MADDPG:
         self.t_step += 1
         if self.t_step % UPDATE_EVERY == 0:
             # If enough samples are available in memory, get random subset and learn
-            if len(self.memory) > BATCH_SIZE * (BUFFER_SIZE / BATCH_SIZE/ 5):
+            if len(self.memory) > BUFFER_SIZE / 3:
                 for ai in range(self.num_agents):
                     mini_batch, idxs, is_weights = self.memory.sample(BATCH_SIZE)
                     self.learn(mini_batch, idxs, is_weights, ai, GAMMA)
@@ -139,18 +138,17 @@ class MADDPG:
             experiences (Tuple[torch.Tensor]): tuple of (s, a, r, s', done) tuples 
             gamma (float): discount factor
         """
-        #   idxes, states, actions, rewards, next_states, is_weights, dones = experiences
-
+        
         mini_batch = [*zip(*experience_batch)] #https://stackoverflow.com/questions/4937491/matrix-transpose-in-python
 
         states = torch.FloatTensor(np.vstack(mini_batch[0])).to(device)
         actions = torch.FloatTensor(list(mini_batch[1])).to(device)
-        rewards = torch.FloatTensor(list(mini_batch[2])).to(device)
+        rewards = (np.array([*zip(*mini_batch[2])]).transpose())[:,ai].reshape(BATCH_SIZE, -1)
         next_states = torch.FloatTensor(np.vstack(mini_batch[3])).to(device)
-        dones = torch.FloatTensor(mini_batch[4]).to(device)
+        dones = (np.array([*zip(*mini_batch[4])]).transpose())[:,ai].reshape(BATCH_SIZE, -1)
 
         # bool to binary
-        # dones = dones.astype(int)
+        dones = dones.astype(int)
 
         agent = self.agents[ai]
         # ---------------------------- update critic ---------------------------- #
@@ -163,32 +161,32 @@ class MADDPG:
         next_states = next_states.view(BATCH_SIZE,-1)
         actions_next = actions_next.view(BATCH_SIZE,-1)
 
-        rewards_tensor = rewards.view(BATCH_SIZE, self.num_agents)
-        dones_tensor = dones.view(BATCH_SIZE, self.num_agents)
-
         Q_targets_next = agent.critic_target(next_states, actions_next)
-        
+        Q_targets_next_np = Q_targets_next.detach().cpu().numpy()
         # Compute Q targets for current states (y_i)
-        discount_np = Q_targets_next.detach().cpu().numpy() * dones_tensor[:,ai].cpu().numpy() * gamma
-        discount_value = torch.FloatTensor(discount_np).to(device)
-        Q_targets = rewards_tensor[:,ai] + discount_value
 
+        dones_flipped = np.array([1 - x for x in dones])
+        # Q_targets = rewards[:,ai] + (gamma * Q_targets_next * (1 - dones[:,ai]))
+        Q_targets_np = rewards + (gamma * np.multiply(Q_targets_next_np, dones_flipped))
+        Q_targets = torch.FloatTensor(Q_targets_np).to(device)
+        
         # Compute critic loss
         Q_expected = agent.critic_local(states.view(BATCH_SIZE,-1), actions.view(BATCH_SIZE,-1))
-
+        Q_expected_np = Q_expected.detach().cpu().numpy()
         # Get priorities and update
-        errors = torch.abs(Q_expected - Q_targets).detach().cpu().numpy()
+        errors = abs(Q_expected_np - Q_targets_np)
         # update priority
         for i in range(BATCH_SIZE):
             idx = idxs[i]
             self.memory.update(idx, errors[i])
 
         # Minimize the loss
+        # compute weighted loss
+        # mean squared error loss
+        critic_loss = (torch.FloatTensor(is_weights).to(device) * F.mse_loss(Q_expected, Q_targets)).mean()
         # zero_grad because we do not want to accumulate 
         # gradients from other batches, so needs to be cleared
         agent.critic_optimizer.zero_grad()
-        # compute weighted loss
-        critic_loss = (torch.FloatTensor(is_weights) * F.mse_loss(Q_expected, Q_targets)).mean()
         # compute derivatives for all variables that
         # requires_grad-True
         critic_loss.backward()
