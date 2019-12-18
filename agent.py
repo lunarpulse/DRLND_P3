@@ -87,38 +87,23 @@ class MADDPG:
     
     def step(self, state, action, reward, next_state, done):
         """Save experience in replay memory, and use random sample from buffer to learn."""
-        # Compute error
-        for ai in range(self.num_agents):
-            agent = self.agents[ai]
-            action_current = agent.act(state, add_noise = False)
-            state_input = torch.from_numpy(state).float().to(device).view(1, -1)
-            action_current_tensor = torch.from_numpy(action_current).float().to(device)
-            old_val = agent.critic_local.forward(state_input, action_current_tensor.view(1, -1)).detach().cpu().numpy()
-            if done[ai]:
-                new_val = reward[ai]
-            else:
-                new_val = reward[ai] + GAMMA * agent.critic_target(state_input, action_current_tensor.view(1, -1)).detach().cpu().numpy()
-
-            # Get priorities and update
-            error = abs(old_val - new_val)
-
-            # Save experience / reward
-            state = np.asanyarray(state)
-            action = np.asanyarray(action)
-            reward = np.asanyarray(reward)
-            next_state = np.asanyarray(next_state)
-            done = np.asanyarray(done)
-            self.memory.add(error,
-                            (state.reshape((1, self.num_agents, -1)), action.reshape((1, self.num_agents, -1)), \
-                            reward.reshape((1, self.num_agents, -1)), next_state.reshape((1,self.num_agents, -1)), \
-                            done.reshape((1, self.num_agents, -1))
-                            ))
+        # Save experience / reward
+        state = np.asanyarray(state)
+        action = np.asanyarray(action)
+        reward = np.asanyarray(reward)
+        next_state = np.asanyarray(next_state)
+        done = np.asanyarray(done)
+        self.memory.add(abs(reward.mean()),
+                        (state.reshape((1, self.num_agents, -1)), action.reshape((1, self.num_agents, -1)), \
+                        reward.reshape((1, self.num_agents, -1)), next_state.reshape((1,self.num_agents, -1)), \
+                        done.reshape((1, self.num_agents, -1))
+                        ))
             
         # Learn every UPDATE_EVERY time steps.
         self.t_step += 1
         if self.t_step % UPDATE_EVERY == 0:
             # If enough samples are available in memory, get random subset and learn
-            if len(self.memory) > BUFFER_SIZE / 3:
+            if len(self.memory) > BUFFER_SIZE / 8:
                 for ai in range(self.num_agents):
                     mini_batch, idxs, is_weights = self.memory.sample(BATCH_SIZE)
                     self.learn(mini_batch, idxs, is_weights, ai, GAMMA)
@@ -161,13 +146,13 @@ class MADDPG:
         next_states = next_states.view(BATCH_SIZE,-1)
         actions_next = actions_next.view(BATCH_SIZE,-1)
 
-        Q_targets_next = agent.critic_target(next_states, actions_next)
-        Q_targets_next_np = Q_targets_next.detach().cpu().numpy()
+        Q_next = agent.critic_target(next_states, actions_next)
+        Q_next_np = Q_next.detach().cpu().numpy()
         # Compute Q targets for current states (y_i)
 
         dones_flipped = np.array([1 - x for x in dones])
         # Q_targets = rewards[:,ai] + (gamma * Q_targets_next * (1 - dones[:,ai]))
-        Q_targets_np = rewards + (gamma * np.multiply(Q_targets_next_np, dones_flipped))
+        Q_targets_np = rewards + (gamma * np.multiply(Q_next_np, dones_flipped))
         Q_targets = torch.FloatTensor(Q_targets_np).to(device)
         
         # Compute critic loss
@@ -183,6 +168,9 @@ class MADDPG:
         # Minimize the loss
         # compute weighted loss
         # mean squared error loss
+        # mse_loss_np = F.mse_loss(Q_expected, Q_targets).detach().cpu().numpy()
+        # weighted_mse_loss_np = np.multiply(is_weights , mse_loss_np) 
+        # critic_loss = torch.FloatTensor( weighted_mse_loss_np ).to(device).mean()
         critic_loss = (torch.FloatTensor(is_weights).to(device) * F.mse_loss(Q_expected, Q_targets)).mean()
         # zero_grad because we do not want to accumulate 
         # gradients from other batches, so needs to be cleared
