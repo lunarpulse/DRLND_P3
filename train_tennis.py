@@ -3,7 +3,6 @@ import numpy as np
 
 from agent import MADDPG
 import torch
-import torch.optim as optim
 
 from collections import deque
 import time
